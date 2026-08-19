@@ -5,23 +5,31 @@
  *
  * Cookies are read through chrome.cookies, not document.cookie, so HttpOnly
  * cookies (cf_clearance, datadome, __Secure-* session cookies, …) are included.
+ * Only cookies belonging to the site in the address bar are listed.
  */
 
 const els = {
   domain: document.getElementById("site-domain"),
   count: document.getElementById("cookie-count"),
   refresh: document.getElementById("refresh"),
+  copyJson: document.getElementById("copy-json"),
   filter: document.getElementById("filter"),
   includeSubdomains: document.getElementById("include-subdomains"),
   includeThirdParty: document.getElementById("include-third-party"),
+  strictValues: document.getElementById("strict-values"),
+  selectAll: document.getElementById("select-all"),
   status: document.getElementById("status"),
   table: document.getElementById("cookie-table"),
   rows: document.getElementById("cookie-rows"),
   footerNote: document.getElementById("footer-note"),
 };
 
-/** Cookies for the current tab, as last loaded. */
+/** Cookies for the current site, deduplicated and filtered. */
 let cookies = [];
+/** Cookie ids ticked for export. */
+const selected = new Set();
+/** Counters for the footer summary. */
+let dropped = { duplicates: 0, invalid: 0 };
 /** Set when third-party discovery was requested but the page blocked injection. */
 let thirdPartyWarning = "";
 
@@ -51,20 +59,50 @@ function baseDomain(hostname) {
   return labels.slice(-take).join(".");
 }
 
-/** Identity of a cookie, for de-duplicating overlapping queries. */
-function cookieKey(cookie) {
+/** Stable id for a cookie, used for selection and de-duplication. */
+function cookieId(cookie) {
   const partition = cookie.partitionKey ? JSON.stringify(cookie.partitionKey) : "";
-  return [cookie.storeId, cookie.domain, cookie.path, cookie.name, partition].join(" ");
+  return [cookie.domain, cookie.path, cookie.name, partition].join(" ");
 }
 
-async function getAll(query) {
-  try {
-    return await chrome.cookies.getAll(query);
-  } catch (err) {
-    // Older Chrome builds reject unknown query properties (e.g. partitionKey).
-    console.debug("cookies.getAll failed for", query, err);
-    return [];
-  }
+/**
+ * Characters RFC 6265 forbids inside a cookie value: control characters,
+ * whitespace, double quote, comma, semicolon and backslash.
+ */
+const RFC_ILLEGAL = /[\x00-\x20",;\\\x7f]/;
+/** Extra characters rejected in strict mode, at the user's request. */
+const STRICT_ILLEGAL = /[$?^*&#!()<>{}[\]|'`]/;
+
+/**
+ * Is this value worth exporting?
+ *
+ * Rejects empties and placeholder junk — a value of "." or "-" or "," carries
+ * no session state and only pollutes the JSON. Values that merely *contain*
+ * dots or dashes are fine: cf_clearance and datadome are full of them.
+ */
+function isUsableValue(value, { strict }) {
+  if (!value || !value.trim()) return false;
+  if (RFC_ILLEGAL.test(value)) return false;
+  if (!/[a-zA-Z0-9]/.test(value)) return false; // punctuation-only, e.g. "." or ","
+  if (strict && STRICT_ILLEGAL.test(value)) return false;
+  return true;
+}
+
+/**
+ * How well a cookie matches the tab's hostname. Used to pick a winner when the
+ * same name exists on several domains or paths — the most specific one is the
+ * cookie the site actually runs on. A first-party cookie always outranks a
+ * third-party one of the same name, so enabling third parties never displaces
+ * the site's own cookies.
+ */
+function specificity(cookie, hostname) {
+  const domain = cookie.domain.replace(/^\./, "");
+  return (
+    (cookie.thirdParty ? 0 : 10000) +
+    (domain === hostname ? 1000 : 0) +
+    domain.length +
+    cookie.path.length
+  );
 }
 
 /**
@@ -108,22 +146,32 @@ async function thirdPartyDomains(tabId, site) {
   return [...domains].sort();
 }
 
+async function getAll(query) {
+  try {
+    return await chrome.cookies.getAll(query);
+  } catch (err) {
+    // Older Chrome builds reject unknown query properties (e.g. partitionKey).
+    console.debug("cookies.getAll failed for", query, err);
+    return [];
+  }
+}
+
 /**
- * Every cookie visible to the current tab.
+ * Every cookie available to the current tab.
  *
  * Overlapping queries are merged because none is complete on its own:
- *   1. by URL          — cookies the browser would send to this exact page
- *   2. by domain       — adds subdomain and non-matching-path cookies
- *   3. by partition key — CHIPS cookies, invisible to the queries above
- *   4. per third-party domain — only when the caller asks for them
+ *   1. by URL           — cookies the browser would send to this exact page
+ *   2. by domain        — adds subdomain and non-matching-path cookies
+ *   3. per third-party domain — only when the caller asks for them
+ *   4. by partition key — CHIPS cookies, invisible to the queries above
+ *
+ * The result is then reduced to one cookie per name, dropping unusable values.
  */
-async function collectCookies(tab, { includeSubdomains, includeThirdParty }) {
+async function collectCookies(tab, { includeSubdomains, includeThirdParty, strict }) {
   const { hostname, protocol } = new URL(tab.url);
   const site = baseDomain(hostname);
-  const topLevelSite = `${protocol}//${site}`;
 
-  const queries = [{ url: tab.url }];
-  queries.push({ domain: includeSubdomains ? site : hostname });
+  const queries = [{ url: tab.url }, { domain: includeSubdomains ? site : hostname }];
 
   thirdPartyWarning = "";
   if (includeThirdParty) {
@@ -138,24 +186,47 @@ async function collectCookies(tab, { includeSubdomains, includeThirdParty }) {
     }
   }
 
+  const topLevelSite = `${protocol}//${site}`;
   for (const query of [...queries]) {
     queries.push({ ...query, partitionKey: { topLevelSite } });
   }
 
   const results = await Promise.all(queries.map(getAll));
 
-  const byKey = new Map();
+  dropped = { duplicates: 0, invalid: 0 };
+  const byName = new Map();
+  const seen = new Set();
+
   for (const cookie of results.flat()) {
+    const id = cookieId(cookie);
+    if (seen.has(id)) continue; // same cookie returned by two queries
+    seen.add(id);
+
     cookie.thirdParty = baseDomain(cookie.domain) !== site;
-    byKey.set(cookieKey(cookie), cookie);
+    if (cookie.thirdParty && !includeThirdParty) continue;
+
+    if (!isUsableValue(cookie.value, { strict })) {
+      dropped.invalid++;
+      continue;
+    }
+
+    // One cookie per name, so the JSON never carries an ambiguous duplicate.
+    const existing = byName.get(cookie.name);
+    if (!existing) {
+      byName.set(cookie.name, cookie);
+      continue;
+    }
+    dropped.duplicates++;
+    if (specificity(cookie, hostname) > specificity(existing, hostname)) {
+      byName.set(cookie.name, cookie);
+    }
   }
 
   // First-party first, then third parties grouped by domain.
-  return [...byKey.values()].sort(
+  return [...byName.values()].sort(
     (a, b) =>
       Number(a.thirdParty) - Number(b.thirdParty) ||
       baseDomain(a.domain).localeCompare(baseDomain(b.domain)) ||
-      a.domain.replace(/^\./, "").localeCompare(b.domain.replace(/^\./, "")) ||
       a.name.localeCompare(b.name)
   );
 }
@@ -186,12 +257,52 @@ function flagsFor(cookie) {
   return flags;
 }
 
+/**
+ * The export shape — a `"cookies": [...]` fragment indented one level, ready to
+ * paste into a larger config object:
+ *
+ *   "cookies": [
+ *     {
+ *       "name": "cf_clearance",
+ *       "value": "…"
+ *     }
+ *   ]
+ *
+ * Stringifying the wrapper and stripping its braces keeps the escaping and the
+ * indentation exactly as JSON.stringify produces them.
+ */
+function toJson(list) {
+  const wrapped = JSON.stringify(
+    { cookies: list.map(({ name, value }) => ({ name, value })) },
+    null,
+    2
+  );
+  return wrapped.split("\n").slice(1, -1).join("\n");
+}
+
+async function copyText(text, button) {
+  const original = button.dataset.label || button.textContent;
+  button.dataset.label = original;
+  try {
+    await navigator.clipboard.writeText(text);
+    button.textContent = "Copied";
+    button.classList.add("copied");
+  } catch (err) {
+    console.debug("clipboard write failed", err);
+    button.textContent = "Failed";
+  }
+  setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove("copied");
+  }, 1200);
+}
+
 function renderGroupRow(domain, isThirdParty, count) {
   const tr = document.createElement("tr");
   tr.className = "group";
 
   const td = document.createElement("td");
-  td.colSpan = 6;
+  td.colSpan = 8;
 
   const wrap = document.createElement("div");
   wrap.className = "group-label";
@@ -216,7 +327,21 @@ function renderGroupRow(domain, isThirdParty, count) {
 }
 
 function renderRow(cookie) {
+  const id = cookieId(cookie);
   const tr = document.createElement("tr");
+
+  const select = document.createElement("td");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = selected.has(id);
+  box.title = "Include in the JSON export";
+  box.addEventListener("change", () => {
+    if (box.checked) selected.add(id);
+    else selected.delete(id);
+    updateSelectionUi();
+  });
+  select.append(box);
+  tr.append(select);
 
   const name = document.createElement("td");
   name.className = "name";
@@ -225,14 +350,10 @@ function renderRow(cookie) {
 
   const value = document.createElement("td");
   const valueText = document.createElement("div");
-  valueText.className = cookie.value ? "value truncated" : "value empty";
-  valueText.textContent = cookie.value || "(empty)";
-  if (cookie.value) {
-    valueText.title = "Click to expand";
-    valueText.addEventListener("click", () => {
-      valueText.classList.toggle("truncated");
-    });
-  }
+  valueText.className = "value truncated";
+  valueText.textContent = cookie.value;
+  valueText.title = "Click to expand";
+  valueText.addEventListener("click", () => valueText.classList.toggle("truncated"));
   value.append(valueText);
   tr.append(value);
 
@@ -263,6 +384,28 @@ function renderRow(cookie) {
   flags.append(flagList);
   tr.append(flags);
 
+  const copy = document.createElement("td");
+  const copyButtons = document.createElement("div");
+  copyButtons.className = "copy-buttons";
+
+  const copyValue = document.createElement("button");
+  copyValue.type = "button";
+  copyValue.className = "mini";
+  copyValue.textContent = "Value";
+  copyValue.title = "Copy just the value";
+  copyValue.addEventListener("click", () => copyText(cookie.value, copyValue));
+
+  const copyOne = document.createElement("button");
+  copyOne.type = "button";
+  copyOne.className = "mini";
+  copyOne.textContent = "JSON";
+  copyOne.title = "Copy this cookie as JSON";
+  copyOne.addEventListener("click", () => copyText(toJson([cookie]), copyOne));
+
+  copyButtons.append(copyValue, copyOne);
+  copy.append(copyButtons);
+  tr.append(copy);
+
   return tr;
 }
 
@@ -273,15 +416,38 @@ function showStatus(message, isError = false) {
   els.table.hidden = true;
 }
 
-function render() {
+/** Cookies currently listed, i.e. after the text filter. */
+function visibleCookies() {
   const needle = els.filter.value.trim().toLowerCase();
-  const visible = needle
-    ? cookies.filter((c) =>
-        `${c.name} ${c.value} ${c.domain}`.toLowerCase().includes(needle)
-      )
-    : cookies;
+  if (!needle) return cookies;
+  return cookies.filter((c) =>
+    `${c.name} ${c.value} ${c.domain}`.toLowerCase().includes(needle)
+  );
+}
 
-  // Group headers only earn their space once more than one domain is listed.
+/** Selection drives the export; with nothing ticked, "Copy JSON" takes them all. */
+function exportList() {
+  const visible = visibleCookies();
+  const picked = visible.filter((c) => selected.has(cookieId(c)));
+  return picked.length ? picked : visible;
+}
+
+function updateSelectionUi() {
+  const visible = visibleCookies();
+  const picked = visible.filter((c) => selected.has(cookieId(c))).length;
+
+  els.selectAll.checked = picked > 0 && picked === visible.length;
+  els.selectAll.indeterminate = picked > 0 && picked < visible.length;
+
+  els.copyJson.textContent = picked ? `Copy JSON (${picked})` : "Copy JSON";
+  els.copyJson.dataset.label = els.copyJson.textContent;
+  els.copyJson.disabled = visible.length === 0;
+}
+
+function render() {
+  const visible = visibleCookies();
+
+  // Domain group headers only earn their space once several domains are listed.
   const grouped = els.includeThirdParty.checked;
   const rows = [];
   let currentGroup = null;
@@ -302,8 +468,13 @@ function render() {
   els.rows.replaceChildren(...rows);
 
   const total = cookies.length;
+  const needle = els.filter.value.trim();
   els.count.textContent =
-    needle && total ? `${visible.length} of ${total} cookies` : `${total} cookie${total === 1 ? "" : "s"}`;
+    needle && total
+      ? `${visible.length} of ${total} cookies`
+      : `${total} cookie${total === 1 ? "" : "s"}`;
+
+  updateSelectionUi();
 
   if (!total) {
     showStatus("No cookies found for this site.");
@@ -320,19 +491,20 @@ function render() {
 
 function updateFooter() {
   const httpOnly = cookies.filter((c) => c.httpOnly).length;
-  const thirdParty = cookies.filter((c) => c.thirdParty).length;
-
-  const parts = [];
-  parts.push(
+  const parts = [
     httpOnly
       ? `${httpOnly} HttpOnly cookie${httpOnly === 1 ? "" : "s"} included — invisible to document.cookie.`
-      : "No HttpOnly cookies here."
-  );
+      : "No HttpOnly cookies here.",
+  ];
   if (els.includeThirdParty.checked) {
+    const thirdParty = cookies.filter((c) => c.thirdParty).length;
     parts.push(`${thirdParty} from third-party domains.`);
   }
+  if (dropped.duplicates) {
+    parts.push(`${dropped.duplicates} duplicate${dropped.duplicates === 1 ? "" : "s"} collapsed by name.`);
+  }
+  if (dropped.invalid) parts.push(`${dropped.invalid} unusable value${dropped.invalid === 1 ? "" : "s"} hidden.`);
   if (thirdPartyWarning) parts.push(thirdPartyWarning);
-
   els.footerNote.textContent = parts.join(" ");
 }
 
@@ -358,11 +530,18 @@ async function load() {
     cookies = await collectCookies(tab, {
       includeSubdomains: els.includeSubdomains.checked,
       includeThirdParty: els.includeThirdParty.checked,
+      strict: els.strictValues.checked,
     });
   } catch (err) {
     els.count.textContent = "";
     showStatus(`Could not read cookies: ${err.message}`, true);
     return;
+  }
+
+  // Drop selections whose cookies are no longer listed.
+  const live = new Set(cookies.map(cookieId));
+  for (const id of [...selected]) {
+    if (!live.has(id)) selected.delete(id);
   }
 
   updateFooter();
@@ -372,6 +551,17 @@ async function load() {
 els.refresh.addEventListener("click", load);
 els.includeSubdomains.addEventListener("change", load);
 els.includeThirdParty.addEventListener("change", load);
+els.strictValues.addEventListener("change", load);
 els.filter.addEventListener("input", render);
+els.copyJson.addEventListener("click", () => copyText(toJson(exportList()), els.copyJson));
+
+els.selectAll.addEventListener("change", () => {
+  const visible = visibleCookies();
+  for (const cookie of visible) {
+    if (els.selectAll.checked) selected.add(cookieId(cookie));
+    else selected.delete(cookieId(cookie));
+  }
+  render();
+});
 
 load();

@@ -11,7 +11,12 @@
         <h1 id="site-domain">Loading…</h1>
         <span id="cookie-count" class="count"></span>
       </div>
-      <button id="refresh" type="button" title="Reload cookies">Refresh</button>
+      <div class="actions">
+        <button id="copy-json" type="button" title="Copy the selected cookies as JSON">
+          Copy JSON
+        </button>
+        <button id="refresh" type="button" title="Reload cookies">Refresh</button>
+      </div>
     </header>
 
     <div class="toolbar">
@@ -22,13 +27,20 @@
         autocomplete="off"
         spellcheck="false"
       />
-      <label class="toggle">
+      <label class="toggle" title="Include cookies set on subdomains of this site">
         <input id="include-subdomains" type="checkbox" checked />
-        Include subdomains
+        Subdomains
       </label>
-      <label class="toggle" title="Also list cookies for every domain this page loaded resources from">
+      <label class="toggle" title="Also list cookies for the domains this page loaded resources from">
         <input id="include-third-party" type="checkbox" />
-        Include third-party
+        Third-party
+      </label>
+      <label
+        class="toggle"
+        title="Also drop values containing $ ? ^ * & # ! and similar — note this removes Google Analytics style values"
+      >
+        <input id="strict-values" type="checkbox" />
+        Strict values
       </label>
     </div>
 
@@ -38,12 +50,16 @@
       <table id="cookie-table" hidden>
         <thead>
           <tr>
+            <th class="col-select">
+              <input id="select-all" type="checkbox" title="Select all listed cookies" />
+            </th>
             <th class="col-name">Name</th>
             <th class="col-value">Value</th>
             <th class="col-domain">Domain</th>
             <th class="col-path">Path</th>
             <th class="col-expires">Expires</th>
             <th class="col-flags">Flags</th>
+            <th class="col-copy">Copy</th>
           </tr>
         </thead>
         <tbody id="cookie-rows"></tbody>

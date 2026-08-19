@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cookie Exporter</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="site">
+        <h1 id="site-domain">Loading…</h1>
+        <span id="cookie-count" class="count"></span>
+      </div>
+      <button id="refresh" type="button" title="Reload cookies">Refresh</button>
+    </header>
+
+    <div class="toolbar">
+      <input
+        id="filter"
+        type="search"
+        placeholder="Filter by name, value or domain…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <label class="toggle">
+        <input id="include-subdomains" type="checkbox" checked />
+        Include subdomains
+      </label>
+      <label class="toggle" title="Also list cookies for every domain this page loaded resources from">
+        <input id="include-third-party" type="checkbox" />
+        Include third-party
+      </label>
+    </div>
+
+    <div id="status" class="status" hidden></div>
+
+    <main>
+      <table id="cookie-table" hidden>
+        <thead>
+          <tr>
+            <th class="col-name">Name</th>
+            <th class="col-value">Value</th>
+            <th class="col-domain">Domain</th>
+            <th class="col-path">Path</th>
+            <th class="col-expires">Expires</th>
+            <th class="col-flags">Flags</th>
+          </tr>
+        </thead>
+        <tbody id="cookie-rows"></tbody>
+      </table>
+    </main>
+
+    <footer>
+      <span id="footer-note"></span>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

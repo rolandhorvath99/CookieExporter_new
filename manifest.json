@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Cookie Exporter",
+  "version": "0.1.0",
+  "description": "View every cookie for the current site, including HttpOnly ones (cf_clearance, datadome) that document.cookie cannot see.",
+  "permissions": ["cookies", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Cookie Exporter",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

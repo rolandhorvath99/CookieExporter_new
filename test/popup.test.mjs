@@ -24,6 +24,8 @@ function node(tag = "div") {
     },
     append(...kids) { n.children.push(...kids); },
     appendChild(kid) { n.children.push(kid); },
+    remove() {},
+    click() { n._clicked = true; },
     addEventListener(evt, fn) { (n._on ||= {})[evt] = fn; },
     replaceChildren(...kids) { n.children = kids; },
   };
@@ -60,17 +62,30 @@ const COOKIES = [
 ];
 
 
+/** Blobs handed to the download path, newest last. */
+const downloads = [];
+
 const sandbox = {
   console,
   setTimeout,
   navigator: { clipboard: { writeText: async () => {} } },
-  URL,
+  URL: Object.assign(
+    function ScopedURL(...args) { return new URL(...args); },
+    URL,
+    { createObjectURL: () => "blob:stub", revokeObjectURL: () => {} }
+  ),
   Date,
   JSON,
   Set,
   Map,
   Number,
-  document: { getElementById: el, createElement: node },
+  document: { getElementById: el, createElement: node, body: node("body") },
+  // Capture what the download hands to the browser instead of writing a file.
+  Blob: class {
+    constructor(parts, opts) {
+      downloads.push({ text: parts.join(""), type: opts?.type });
+    }
+  },
   chrome: {
     tabs: { query: async () => [{ id: 1, url: "https://www.example.com/page" }] },
     cookies: {
@@ -96,7 +111,7 @@ const EPILOGUE = `
 globalThis.__t = {
   get cookies() { return cookies; },
   get dropped() { return dropped; },
-  selected, load, render, toJson, exportList, cookieId,
+  selected, load, render, toJson, exportList, cookieId, saveJsonFile, downloadFilename,
 };`;
 
 vm.runInContext(fs.readFileSync(SRC, "utf8") + EPILOGUE, ctx);
@@ -191,5 +206,30 @@ el("include-third-party").checked = false;
 await t.load();
 await settle();
 assert.ok(!names().includes("__eoi_tracker"), "third-party cookie leaked with the toggle off");
+
+// Download: a standalone document, not the clipboard fragment
+t.saveJsonFile(t.exportList(), el("download-json"));
+const file = downloads.at(-1);
+assert.strictEqual(file.type, "application/json", "wrong MIME type");
+assert.doesNotThrow(() => JSON.parse(file.text), "downloaded file must parse on its own");
+assert.strictEqual(file.text.at(-1), "\n", "file should end with a newline");
+
+const fromFile = JSON.parse(file.text);
+assert.deepStrictEqual(Object.keys(fromFile), ["cookies"]);
+assert.deepStrictEqual(
+  fromFile.cookies,
+  parseFragment(t.toJson(t.exportList())).cookies,
+  "download and clipboard payloads disagree"
+);
+console.log("\n--- Downloaded file ---\n" + file.text.trimEnd());
+
+// Filename is stable, sortable and filesystem-safe
+const name = t.downloadFilename("www.example.com", new Date(2026, 7, 26, 10, 42));
+assert.strictEqual(name, "cookies-www.example.com-20260826-1042.json", `got ${name}`);
+assert.strictEqual(
+  t.downloadFilename("a/b:c*d", new Date(2026, 0, 1, 0, 5)),
+  "cookies-a_b_c_d-20260101-0005.json",
+  "unsafe characters not stripped"
+);
 
 console.log("\n✓ all assertions passed");

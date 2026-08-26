@@ -39,6 +39,7 @@ Controls:
 - **Third-party** — off by default, see [Third-party cookies](#third-party-cookies).
 - **Strict values** — off by default, see [Value filtering](#value-filtering).
 - **Copy JSON** — copies the ticked cookies. With nothing ticked it copies everything currently listed. The header checkbox ticks or clears all listed rows at once.
+- **Download** — saves the same cookies as a `.json` file, named `cookies-<host>-<YYYYMMDD-HHMM>.json`. It follows the selection and the filter exactly like Copy JSON does.
 - **Refresh** — re-read the cookie store (cookies can change while the popup is open).
 
 ### Export format
@@ -59,6 +60,21 @@ The clipboard gets a `"cookies"` **fragment**, indented one level and without en
 ```
 
 Name and value only — domain, path, flags and expiry are shown in the table but deliberately left out. Because it is a fragment it will not parse on its own; wrap it in `{ }` if you need a standalone document.
+
+**Download** writes that wrapped form, since a `.json` file has no parent object to sit inside and anything reading one expects it to parse:
+
+```json
+{
+  "cookies": [
+    {
+      "name": "cf_clearance",
+      "value": "…"
+    }
+  ]
+}
+```
+
+The cookie list is identical either way — only the outer braces differ, and a test asserts the two payloads stay in agreement.
 
 ## What gets excluded
 
@@ -120,7 +136,7 @@ Unit-level checks for the filtering, de-duplication and export logic run in Node
 node test/popup.test.mjs
 ```
 
-It covers the third-party toggle in both positions, duplicate resolution (including a third-party cookie failing to displace a first-party one of the same name), each value-filter rule, strict mode, selection, and the exact JSON fragment shape down to its indentation.
+It covers the third-party toggle in both positions, duplicate resolution (including a third-party cookie failing to displace a first-party one of the same name), each value-filter rule, strict mode, selection, the exact JSON fragment shape down to its indentation, and the downloaded file — MIME type, standalone parseability and filename format.
 
 For a real browser check: load the extension, open a Cloudflare-protected site, and compare against DevTools → Application → Cookies (which also shows `HttpOnly` cookies). In the page console, `document.cookie.split('; ').filter(Boolean).length` should be *lower* than what the popup lists. Right-click the popup → **Inspect** to debug it; reopen the popup after editing `popup.*`, and reload the extension card after editing `manifest.json`.
 

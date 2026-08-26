@@ -13,6 +13,7 @@ const els = {
   count: document.getElementById("cookie-count"),
   refresh: document.getElementById("refresh"),
   copyJson: document.getElementById("copy-json"),
+  downloadJson: document.getElementById("download-json"),
   filter: document.getElementById("filter"),
   includeSubdomains: document.getElementById("include-subdomains"),
   includeThirdParty: document.getElementById("include-third-party"),
@@ -32,6 +33,8 @@ const selected = new Set();
 let dropped = { duplicates: 0, invalid: 0 };
 /** Set when third-party discovery was requested but the page blocked injection. */
 let thirdPartyWarning = "";
+/** Hostname of the active tab, used to name the downloaded file. */
+let currentHostname = "";
 
 /**
  * Public suffixes that need two labels to reach the registrable domain.
@@ -272,12 +275,58 @@ function flagsFor(cookie) {
  * indentation exactly as JSON.stringify produces them.
  */
 function toJson(list) {
-  const wrapped = JSON.stringify(
+  return toJsonDocument(list).split("\n").slice(1, -1).join("\n");
+}
+
+/**
+ * The same payload as a standalone document, braces included. Used for the
+ * download: a .json file has no parent object to sit in, and anything reading
+ * one expects it to parse on its own.
+ */
+function toJsonDocument(list) {
+  return JSON.stringify(
     { cookies: list.map(({ name, value }) => ({ name, value })) },
     null,
     2
   );
-  return wrapped.split("\n").slice(1, -1).join("\n");
+}
+
+/** e.g. "cookies-www.example.com-20260826-1042.json" */
+function downloadFilename(hostname, now) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp =
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+    `-${pad(now.getHours())}${pad(now.getMinutes())}`;
+  const host = hostname.replace(/[^a-z0-9.-]/gi, "_") || "cookies";
+  return `cookies-${host}-${stamp}.json`;
+}
+
+/**
+ * Hand the JSON to the browser as a file. A blob URL plus a synthetic click
+ * stays within the permissions already granted — chrome.downloads would need
+ * another one for no benefit here.
+ */
+function saveJsonFile(list, button) {
+  const original = button.dataset.label || button.textContent;
+  button.dataset.label = original;
+
+  const url = URL.createObjectURL(
+    new Blob([toJsonDocument(list) + "\n"], { type: "application/json" })
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = downloadFilename(currentHostname, new Date());
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+
+  button.textContent = "Saved";
+  button.classList.add("copied");
+  setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove("copied");
+  }, 1200);
 }
 
 async function copyText(text, button) {
@@ -442,6 +491,9 @@ function updateSelectionUi() {
   els.copyJson.textContent = picked ? `Copy JSON (${picked})` : "Copy JSON";
   els.copyJson.dataset.label = els.copyJson.textContent;
   els.copyJson.disabled = visible.length === 0;
+
+  els.downloadJson.dataset.label = els.downloadJson.textContent = "Download";
+  els.downloadJson.disabled = visible.length === 0;
 }
 
 function render() {
@@ -524,6 +576,7 @@ async function load() {
   }
 
   const { hostname } = new URL(tab.url);
+  currentHostname = hostname;
   els.domain.textContent = hostname;
 
   try {
@@ -554,6 +607,7 @@ els.includeThirdParty.addEventListener("change", load);
 els.strictValues.addEventListener("change", load);
 els.filter.addEventListener("input", render);
 els.copyJson.addEventListener("click", () => copyText(toJson(exportList()), els.copyJson));
+els.downloadJson.addEventListener("click", () => saveJsonFile(exportList(), els.downloadJson));
 
 els.selectAll.addEventListener("change", () => {
   const visible = visibleCookies();

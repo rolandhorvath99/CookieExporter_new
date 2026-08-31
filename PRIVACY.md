@@ -74,4 +74,4 @@ changes will also be noted in the extension's Chrome Web Store listing.
 
 ## Contact
 
-Questions about this policy or the extension: <CONTACT EMAIL>
+Questions about this policy or the extension: <roland.horvath@meltwater.com>
